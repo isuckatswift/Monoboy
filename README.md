@@ -4,7 +4,7 @@
 
 *Monoboy aims to provide an accurate, lightweight, and intuitive Game Boy emulation experience on Apple devices — without requiring JIT compilation or additional memory entitlements.*
 
-Features
+## Features
 
 * Native Swift implementation
 * Game Boy (DMG) emulation
@@ -18,7 +18,7 @@ Features
 
 Features will be added as development progresses.
 
-Compatibility
+## Compatibility
 
 Platform	Support
 iPhone	Planned
@@ -26,7 +26,7 @@ iPad	Planned
 iOS / iPadOS	Planned
 Game Boy (DMG)	Target
 
-Architecture
+## Architecture
 
 Monoboy is designed around a modular emulator core, separate from its SwiftUI interface.
 
@@ -37,18 +37,18 @@ Monoboy is designed around a modular emulator core, separate from its SwiftUI in
 * Audio: Game Boy sound hardware emulation
 * Input: Game Boy button mapping
 
-Development
+## Development
 
 Monoboy is written in Swift and uses SwiftUI for its interface.
 
 The project is designed for iPad-first development, with automated builds and testing through GitHub Actions.
 
-Project Status
+## Project Status
 
 🚧 Early development
 
 Monoboy is currently under development. Features, compatibility, and accuracy will improve over time.
 
-License
+## License
 
 Monoboy is licensed under the MIT License. See LICENSE for details.
