@@ -1,0 +1,100 @@
+import XCTest
+@testable import Monoboy
+
+final class TimerTests: XCTestCase {
+
+    /// A timer with TIMA = 0, TMA = 0, divider = 0 and the given TAC clock select enabled.
+    private func makeTimer(select: UInt8) -> GBTimer {
+        let timer = GBTimer()
+        timer.resetDivider()
+        timer.tima = 0
+        timer.tma = 0
+        timer.writeTAC(0x04 | select)
+        timer.irq = 0
+        return timer
+    }
+
+    func testAllFourTACFrequencies() {
+        // (TAC select, T-cycles per TIMA increment)
+        let cases: [(UInt8, Int)] = [(0, 1024), (1, 16), (2, 64), (3, 256)]
+        for (select, period) in cases {
+            let timer = makeTimer(select: select)
+            timer.step(period - 4)
+            XCTAssertEqual(timer.tima, 0, "TAC select \(select) ticked early")
+            timer.step(4)
+            XCTAssertEqual(timer.tima, 1, "TAC select \(select) didn't tick after \(period) cycles")
+            timer.step(period)
+            XCTAssertEqual(timer.tima, 2, "TAC select \(select) second tick")
+        }
+    }
+
+    func testDisabledTimerDoesNotCount() {
+        let timer = makeTimer(select: 1)
+        timer.writeTAC(0x01) // enable bit cleared
+        timer.step(1024)
+        XCTAssertEqual(timer.tima, 0)
+    }
+
+    func testOverflowIsDelayedByOneMachineCycle() {
+        let timer = makeTimer(select: 1)
+        timer.tima = 0xFF
+        timer.tma = 0x42
+
+        timer.step(16) // overflow happens in the last machine cycle
+        XCTAssertEqual(timer.tima, 0x00, "TIMA reads 0 during the delay cycle")
+        XCTAssertEqual(timer.irq & 0x04, 0, "interrupt must not fire yet")
+
+        timer.step(4)
+        XCTAssertEqual(timer.tima, 0x42, "TIMA reloads from TMA")
+        XCTAssertEqual(timer.irq & 0x04, 0x04, "interrupt fires on reload")
+    }
+
+    func testWritingTIMADuringDelayCancelsReloadAndInterrupt() {
+        let timer = makeTimer(select: 1)
+        timer.tima = 0xFF
+        timer.tma = 0x42
+
+        timer.step(16)
+        timer.writeTIMA(0x10)
+        timer.step(4)
+
+        XCTAssertEqual(timer.tima, 0x10)
+        XCTAssertEqual(timer.irq & 0x04, 0)
+    }
+
+    func testWritingTIMAOnReloadCycleIsIgnored() {
+        let timer = makeTimer(select: 1)
+        timer.tima = 0xFF
+        timer.tma = 0x42
+
+        timer.step(20) // overflow + reload cycle
+        timer.writeTIMA(0x10)
+
+        XCTAssertEqual(timer.tima, 0x42)
+    }
+
+    func testWritingTMAOnReloadCycleUpdatesTIMA() {
+        let timer = makeTimer(select: 1)
+        timer.tima = 0xFF
+        timer.tma = 0x42
+
+        timer.step(20)
+        timer.writeTMA(0x77)
+
+        XCTAssertEqual(timer.tima, 0x77)
+    }
+
+    func testDividerResetCanTickTimer() {
+        let timer = makeTimer(select: 1)
+        timer.step(8)          // watched bit (bit 3) is now high
+        timer.resetDivider()   // clearing it is a falling edge
+        XCTAssertEqual(timer.tima, 1)
+    }
+
+    func testTACChangeCanTickTimer() {
+        let timer = makeTimer(select: 1)
+        timer.step(8)          // bit 3 high
+        timer.writeTAC(0x00)   // disabling the timer drops the signal
+        XCTAssertEqual(timer.tima, 1)
+    }
+}
