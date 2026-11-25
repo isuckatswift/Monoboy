@@ -1,0 +1,47 @@
+name: Monoboy
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+  configs:
+    # The emulator core is CPU-heavy; keep Debug builds fast enough to play.
+    Debug:
+      SWIFT_OPTIMIZATION_LEVEL: "-O"
+
+targets:
+  Monoboy:
+    type: application
+    platform: iOS
+    sources:
+      - Monoboy
+    settings:
+      base:
+        PRODUCT_NAME: Monoboy
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.monoboy
+        TARGETED_DEVICE_FAMILY: "1,2"   # iPhone + iPad
+    info:
+      path: Monoboy/Info.plist
+      properties:
+        CFBundleDisplayName: Monoboy
+        UILaunchScreen: {}
+        UIFileSharingEnabled: true               # ROMs/Saves visible in the Files app
+        LSSupportsOpeningDocumentsInPlace: true
+        UIRequiresFullScreen: false
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
