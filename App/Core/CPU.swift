@@ -1,5 +1,17 @@
 import Foundation
 
+/// Raised when the CPU fetches one of the 11 undefined LR35902 opcodes.
+/// Real hardware locks up permanently; the emulator does the same and reports it.
+struct IllegalOpcode: LocalizedError {
+    let opcode: UInt8
+    let address: UInt16
+
+    var errorDescription: String? {
+        String(format: "The game executed an illegal instruction (0x%02X at 0x%04X) and the CPU locked up.",
+               Int(opcode), Int(address))
+    }
+}
+
 /// Sharp LR35902 (Game Boy CPU) interpreter.
 /// Instructions execute atomically and return their cost in T-cycles.
 final class CPU {
@@ -20,7 +32,12 @@ final class CPU {
     private var halted = false
     private var haltBug = false
 
-    unowned(unsafe) private let mmu: MMU
+    /// True after STOP until a button is pressed. The whole system is frozen meanwhile.
+    private(set) var isStopped = false
+    /// Non-nil once an illegal opcode has been executed. The CPU stays locked up.
+    private(set) var illegalOpcode: IllegalOpcode?
+
+    unowned private let mmu: MMU
 
     init(mmu: MMU) {
         self.mmu = mmu
@@ -272,6 +289,14 @@ final class CPU {
 
     /// Executes one instruction (or services an interrupt) and returns T-cycles used.
     func step() -> Int {
+        // Locked up by an illegal opcode: nothing can recover the CPU.
+        if illegalOpcode != nil { return 4 }
+
+        // STOP: only a button press wakes the CPU.
+        if isStopped {
+            if mmu.joypad.anyButtonPressed { isStopped = false } else { return 4 }
+        }
+
         let pending = mmu.ie & mmu.ifReg & 0x1F
 
         if halted {
@@ -294,7 +319,16 @@ final class CPU {
         return cycles
     }
 
+    private func lockUp(opcode: UInt8, address: UInt16) -> Int {
+        illegalOpcode = IllegalOpcode(opcode: opcode, address: address)
+        #if DEBUG
+        print(String(format: "[CPU] Illegal opcode 0x%02X at PC=0x%04X", Int(opcode), Int(address)))
+        #endif
+        return 4
+    }
+
     private func execute() -> Int {
+        let address = pc
         let op = fetch()
 
         switch op {
@@ -363,7 +397,11 @@ final class CPU {
         case 0x2F: a = ~a; f = (f & 0x90) | 0x60; return 4
         case 0x37: f = (f & 0x80) | 0x10; return 4
         case 0x3F: f = (f & 0x80) | (carryFlag ? 0 : 0x10); return 4
-        case 0x10: _ = fetch(); return 4 // STOP
+        case 0x10: // STOP (2 bytes: opcode + padding)
+            _ = fetch()
+            mmu.timer.resetDivider()
+            if !mmu.joypad.anyButtonPressed { isStopped = true }
+            return 4
 
         // Relative jumps
         case 0x18:
@@ -446,8 +484,13 @@ final class CPU {
         case 0xF3: ime = false; eiPending = false; return 4
         case 0xFB: eiPending = true; return 4
 
-        // Illegal opcodes behave as NOPs here
-        default: return 4
+        // The 11 undefined opcodes lock up the CPU on real hardware
+        case 0xD3, 0xDB, 0xDD, 0xE3, 0xE4, 0xEB, 0xEC, 0xED, 0xF4, 0xFC, 0xFD:
+            return lockUp(opcode: op, address: address)
+
+        // Unreachable: every defined opcode is handled above
+        default:
+            return lockUp(opcode: op, address: address)
         }
     }
 }
