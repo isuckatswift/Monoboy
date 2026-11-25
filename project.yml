@@ -20,14 +20,14 @@ targets:
     type: application
     platform: iOS
     sources:
-      - Monoboy
+      - App
     settings:
       base:
         PRODUCT_NAME: Monoboy
-        PRODUCT_BUNDLE_IDENTIFIER: com.isuckatswift.monoboy
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.monoboy
         TARGETED_DEVICE_FAMILY: "1,2"   # iPhone + iPad
     info:
-      path: Monoboy/Info.plist
+      path: App/Info.plist
       properties:
         CFBundleDisplayName: Monoboy
         UILaunchScreen: {}
@@ -45,3 +45,27 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+
+  MonoboyTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+    dependencies:
+      - target: Monoboy
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.monoboy.tests
+
+schemes:
+  Monoboy:
+    build:
+      targets:
+        Monoboy: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - MonoboyTests
