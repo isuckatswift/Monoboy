@@ -1,20 +1,18 @@
 import SwiftUI
-import QuartzCore
 import CoreGraphics
 
-/// Separate from the main view model so only the screen redraws at 60 fps.
+/// Separate from the main view model so only the screen redraws every frame.
 final class ScreenModel: ObservableObject {
     @Published var image: CGImage?
 }
 
-/// CADisplayLink needs an NSObject target.
-final class FrameTicker: NSObject {
-    var onTick: (() -> Void)?
-    @objc func tick() { onTick?() }
-}
-
-/// Owns the running GameBoy, the display link, ROM library and save files.
-/// Everything here runs on the main thread.
+/// Threading model
+/// ---------------
+/// - The view model itself (all @Published state, library, UI actions) lives on the main thread.
+/// - The emulator (`gameBoy`, save files, the frame timer) is touched ONLY on `emuQueue`,
+///   a dedicated serial queue. Input, palette changes and pause/resume are forwarded to it.
+/// - Finished frames are converted to a CGImage on `emuQueue` and handed to the main
+///   thread for display. If the UI hasn't drawn the previous frame yet, the new one is dropped.
 final class EmulatorViewModel: ObservableObject {
     let screen = ScreenModel()
 
@@ -26,18 +24,29 @@ final class EmulatorViewModel: ObservableObject {
     @Published var palette: DMGPalette {
         didSet {
             UserDefaults.standard.set(palette.rawValue, forKey: "monoboy.palette")
-            gameBoy?.mmu.ppu.palette = palette.colors
+            let colors = palette.colors
+            emuQueue.async { [weak self] in self?.gameBoy?.mmu.ppu.palette = colors }
         }
     }
 
+    // MARK: Main-thread state
+    private var currentURL: URL?
+    private let controllers = ControllerManager()
+    private let fileManager = FileManager.default
+
+    // MARK: Emulation-queue state (never touch from other threads)
+    private let emuQueue = DispatchQueue(label: "com.monoboy.emulation", qos: .userInteractive)
     private var gameBoy: GameBoy?
     private var romURL: URL?
-    private var displayLink: CADisplayLink?
-    private let ticker = FrameTicker()
-    private let controllers = ControllerManager()
+    private var frameTimer: DispatchSourceTimer?
     private var frameCount = 0
 
-    private let fileManager = FileManager.default
+    // MARK: Frame hand-off
+    private let publishLock = NSLock()
+    private var frameInFlight = false
+
+    /// Game Boy refresh rate: 4194304 Hz / 70224 cycles = 59.7275 fps.
+    private static let framePeriodNanoseconds = 16_742_706
 
     private var documents: URL {
         fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -49,7 +58,6 @@ final class EmulatorViewModel: ObservableObject {
         let saved = UserDefaults.standard.integer(forKey: "monoboy.palette")
         palette = DMGPalette(rawValue: saved) ?? .mono
 
-        ticker.onTick = { [weak self] in self?.runFrame() }
         controllers.onButton = { [weak self] button, pressed in self?.press(button, pressed: pressed) }
 
         try? fileManager.createDirectory(at: romsDirectory, withIntermediateDirectories: true)
@@ -57,7 +65,7 @@ final class EmulatorViewModel: ObservableObject {
         refreshLibrary()
     }
 
-    // MARK: - Library
+    // MARK: - Library (main thread)
 
     func refreshLibrary() {
         let files = (try? fileManager.contentsOfDirectory(
@@ -78,10 +86,14 @@ final class EmulatorViewModel: ObservableObject {
             }
             do {
                 let destination = romsDirectory.appendingPathComponent(url.lastPathComponent)
+                // Copy to a temporary file first so an existing ROM is never lost if the copy fails.
+                let temporary = romsDirectory.appendingPathComponent(".import-\(UUID().uuidString)")
+                try fileManager.copyItem(at: url, to: temporary)
                 if fileManager.fileExists(atPath: destination.path) {
-                    try fileManager.removeItem(at: destination)
+                    _ = try fileManager.replaceItemAt(destination, withItemAt: temporary)
+                } else {
+                    try fileManager.moveItem(at: temporary, to: destination)
                 }
-                try fileManager.copyItem(at: url, to: destination)
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -96,90 +108,168 @@ final class EmulatorViewModel: ObservableObject {
         refreshLibrary()
     }
 
-    // MARK: - Game lifecycle
+    // MARK: - Game lifecycle (called on main, work happens on emuQueue)
 
     func load(_ url: URL) {
-        unload()
-        do {
-            let data = try Data(contentsOf: url)
-            let cartridge = try Cartridge(rom: [UInt8](data))
-            if cartridge.hasBattery, let saved = try? Data(contentsOf: savePath(for: url)) {
-                cartridge.loadRAM([UInt8](saved))
-            }
-            let gb = GameBoy(cartridge: cartridge)
-            gb.mmu.ppu.palette = palette.colors
+        currentURL = url
+        errorMessage = nil
+        let title = url.deletingPathExtension().lastPathComponent
+        let colors = palette.colors
+        let savePath = savePath(for: url)
 
-            gameBoy = gb
-            romURL = url
-            currentTitle = url.deletingPathExtension().lastPathComponent
-            isPaused = false
-            isGameLoaded = true
-            startLoop()
-        } catch {
-            errorMessage = error.localizedDescription
+        emuQueue.async { [weak self] in
+            guard let self else { return }
+            self.stopTimer()
+            self.saveRAM()   // flush the previous game, if any
+
+            do {
+                // File reading and ROM parsing happen off the main thread.
+                let data = try Data(contentsOf: url)
+                let cartridge = try Cartridge(rom: [UInt8](data))
+                if cartridge.hasBattery, let saved = try? Data(contentsOf: savePath) {
+                    cartridge.loadRAM([UInt8](saved))
+                }
+                let gb = GameBoy(cartridge: cartridge)
+                gb.mmu.ppu.palette = colors
+
+                self.gameBoy = gb
+                self.romURL = url
+                self.frameCount = 0
+                self.startTimer()
+
+                DispatchQueue.main.async {
+                    self.currentTitle = title
+                    self.isPaused = false
+                    self.isGameLoaded = true
+                    UIApplication.shared.isIdleTimerDisabled = true
+                }
+            } catch {
+                self.gameBoy = nil
+                self.romURL = nil
+                DispatchQueue.main.async {
+                    self.currentURL = nil
+                    self.errorMessage = error.localizedDescription
+                }
+            }
         }
     }
 
     func unload() {
-        stopLoop()
-        saveRAM()
-        gameBoy = nil
-        romURL = nil
+        currentURL = nil
         isGameLoaded = false
         isPaused = false
         screen.image = nil
+        UIApplication.shared.isIdleTimerDisabled = false
+
+        emuQueue.async { [weak self] in
+            guard let self else { return }
+            self.stopTimer()
+            self.saveRAM()
+            self.gameBoy = nil
+            self.romURL = nil
+        }
     }
 
     func reset() {
-        if let url = romURL { load(url) }
+        if let url = currentURL { load(url) }
     }
 
     func togglePause() {
+        guard isGameLoaded else { return }
         isPaused.toggle()
-        if isPaused {
-            stopLoop()
-            saveRAM()
-        } else {
-            startLoop()
+        let paused = isPaused
+        UIApplication.shared.isIdleTimerDisabled = !paused
+
+        emuQueue.async { [weak self] in
+            guard let self else { return }
+            if paused {
+                self.stopTimer()
+                self.saveRAM()
+            } else if self.gameBoy != nil {
+                self.startTimer()
+            }
         }
     }
 
     func scenePhaseChanged(isActive: Bool) {
-        if !isActive {
-            saveRAM()
-            stopLoop()
-        } else if isGameLoaded && !isPaused {
-            startLoop()
+        let shouldRun = isActive && isGameLoaded && !isPaused
+        UIApplication.shared.isIdleTimerDisabled = shouldRun
+
+        emuQueue.async { [weak self] in
+            guard let self else { return }
+            if shouldRun {
+                if self.gameBoy != nil { self.startTimer() }
+            } else if !isActive {
+                self.stopTimer()
+                self.saveRAM()
+            }
         }
     }
 
+    /// Safe to call from any thread; the joypad is only ever touched on `emuQueue`.
     func press(_ button: GBButton, pressed: Bool) {
-        gameBoy?.mmu.joypad.set(button, pressed: pressed)
+        emuQueue.async { [weak self] in
+            self?.gameBoy?.mmu.joypad.set(button, pressed: pressed)
+        }
     }
 
-    // MARK: - Loop
+    // MARK: - Emulation loop (emuQueue only)
 
-    private func startLoop() {
-        stopLoop()
-        let link = CADisplayLink(target: ticker, selector: #selector(FrameTicker.tick))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
-        link.add(to: .main, forMode: .common)
-        displayLink = link
-        UIApplication.shared.isIdleTimerDisabled = true
+    private func startTimer() {
+        stopTimer()
+        let timer = DispatchSource.makeTimerSource(flags: .strict, queue: emuQueue)
+        timer.schedule(deadline: .now(),
+                       repeating: .nanoseconds(EmulatorViewModel.framePeriodNanoseconds),
+                       leeway: .microseconds(100))
+        timer.setEventHandler { [weak self] in self?.emulateFrame() }
+        timer.resume()
+        frameTimer = timer
     }
 
-    private func stopLoop() {
-        displayLink?.invalidate()
-        displayLink = nil
-        UIApplication.shared.isIdleTimerDisabled = false
+    private func stopTimer() {
+        frameTimer?.cancel()
+        frameTimer = nil
     }
 
-    private func runFrame() {
+    private func emulateFrame() {
         guard let gb = gameBoy else { return }
         gb.runFrame()
-        screen.image = makeImage(from: gb.mmu.ppu.framebuffer)
+
+        if let fault = gb.cpu.illegalOpcode {
+            stopTimer()
+            saveRAM()
+            DispatchQueue.main.async { [weak self] in
+                self?.isPaused = true
+                self?.errorMessage = fault.localizedDescription
+                UIApplication.shared.isIdleTimerDisabled = false
+            }
+            return
+        }
+
+        publish(makeImage(from: gb.mmu.ppu.framebuffer))
+
         frameCount += 1
         if frameCount % 300 == 0 { saveRAM() }
+    }
+
+    /// Hands a finished frame to the main thread. Drops the frame if the UI
+    /// hasn't consumed the previous one, so the emulator never queues up UI work.
+    private func publish(_ image: CGImage?) {
+        publishLock.lock()
+        if frameInFlight {
+            publishLock.unlock()
+            return
+        }
+        frameInFlight = true
+        publishLock.unlock()
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.publishLock.lock()
+            self.frameInFlight = false
+            self.publishLock.unlock()
+            if self.isGameLoaded { self.screen.image = image }
+        }
     }
 
     private func makeImage(from pixels: [UInt32]) -> CGImage? {
@@ -200,7 +290,7 @@ final class EmulatorViewModel: ObservableObject {
         )
     }
 
-    // MARK: - Saves
+    // MARK: - Saves (emuQueue only)
 
     private func savePath(for rom: URL) -> URL {
         savesDirectory.appendingPathComponent(rom.deletingPathExtension().lastPathComponent + ".sav")
@@ -213,7 +303,9 @@ final class EmulatorViewModel: ObservableObject {
             try Data(gb.cartridge.ram).write(to: savePath(for: url), options: .atomic)
             gb.cartridge.ramDirty = false
         } catch {
-            errorMessage = "Couldn’t save game data: \(error.localizedDescription)"
+            DispatchQueue.main.async { [weak self] in
+                self?.errorMessage = "Couldn’t save game data: \(error.localizedDescription)"
+            }
         }
     }
 }
