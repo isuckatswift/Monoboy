@@ -79,6 +79,7 @@ Monoboy/
     ├── ControlsView.swift       Touch controls
     └── ControllerManager.swift  GameController support
 
+
 The Core folder has no UIKit/SwiftUI dependencies, so it can be reused in a Swift package, macOS app or test target.
 
 ## Testing accuracy
