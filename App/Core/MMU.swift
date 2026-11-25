@@ -85,8 +85,8 @@ final class MMU {
                 serialControl = value & 0x7F
             }
         case 0xFF04: timer.resetDivider()
-        case 0xFF05: timer.tima = value
-        case 0xFF06: timer.tma = value
+        case 0xFF05: timer.writeTIMA(value)
+        case 0xFF06: timer.writeTMA(value)
         case 0xFF07: timer.writeTAC(value)
         case 0xFF0F: ifReg = value & 0x1F
         case 0xFF46:
