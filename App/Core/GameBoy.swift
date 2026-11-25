@@ -19,14 +19,27 @@ final class GameBoy {
         #endif
     }
 
-    /// Runs until the PPU finishes a frame (or one frame's worth of cycles
-    /// if the LCD is switched off).
+    /// Runs one frame's worth of emulation.
+    ///
+    /// - LCD on: runs until the PPU finishes a frame (start of VBlank).
+    /// - LCD off (or CPU stopped): the PPU never signals a frame, so run exactly
+    ///   one frame of cycles. This keeps emulation speed at 1x instead of 2x.
+    /// - Illegal opcode: returns immediately; check `cpu.illegalOpcode`.
     func runFrame() {
         mmu.ppu.frameComplete = false
         var elapsed = 0
-        while !mmu.ppu.frameComplete && elapsed < GameBoy.cyclesPerFrame * 2 {
+
+        while !mmu.ppu.frameComplete {
+            let limit = (mmu.ppu.isLCDEnabled && !cpu.isStopped)
+                ? GameBoy.cyclesPerFrame * 2   // safety net only; VBlank ends the frame first
+                : GameBoy.cyclesPerFrame
+            if elapsed >= limit { break }
+
             let cycles = cpu.step()
-            mmu.tick(cycles)
+            if cpu.illegalOpcode != nil { return }
+
+            // STOP freezes the whole system, including timers and the LCD.
+            if !cpu.isStopped { mmu.tick(cycles) }
             elapsed += cycles
         }
     }
