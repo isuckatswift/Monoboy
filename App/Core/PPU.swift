@@ -28,6 +28,10 @@ final class PPU {
     private var mode: UInt8 = 2
     private var dots = 0
     private var windowLine = 0
+    /// Previous level of the combined STAT interrupt line (for rising-edge detection).
+    private var statLine = false
+
+    var isLCDEnabled: Bool { lcdc & 0x80 != 0 }
 
     /// Set when a full frame has been drawn (start of VBlank).
     var frameComplete = false
@@ -74,20 +78,23 @@ final class PPU {
                 dots = 0
                 mode = 0
                 windowLine = 0
+                statLine = false
                 for i in 0..<framebuffer.count { framebuffer[i] = palette[0] }
             } else if !wasOn && isOn {
                 ly = 0
                 dots = 0
                 mode = 2
-                checkLYC()
+                updateStatLine()
             }
-        case 0xFF41: stat = value & 0x78
+        case 0xFF41:
+            stat = value & 0x78
+            if isLCDEnabled { updateStatLine() }
         case 0xFF42: scy = value
         case 0xFF43: scx = value
         case 0xFF44: break // LY is read-only
         case 0xFF45:
             lyc = value
-            if lcdc & 0x80 != 0 { checkLYC() }
+            if isLCDEnabled { updateStatLine() }
         case 0xFF47: bgp = value
         case 0xFF48: obp0 = value
         case 0xFF49: obp1 = value
@@ -99,8 +106,23 @@ final class PPU {
 
     // MARK: - Timing
 
-    private func checkLYC() {
-        if ly == lyc && stat & 0x40 != 0 { irq |= 0x02 }
+    /// STAT interrupts come from one combined signal: the OR of every enabled
+    /// condition (LYC match, HBlank, VBlank, OAM scan). An interrupt is requested
+    /// only when that signal goes from low to high, so overlapping conditions
+    /// don't fire twice ("STAT blocking").
+    private func updateStatLine() {
+        var line = false
+        if lcdc & 0x80 != 0 {
+            if ly == lyc && stat & 0x40 != 0 { line = true }
+            switch mode {
+            case 0: if stat & 0x08 != 0 { line = true }
+            case 1: if stat & 0x10 != 0 { line = true }
+            case 2: if stat & 0x20 != 0 { line = true }
+            default: break
+            }
+        }
+        if line && !statLine { irq |= 0x02 }
+        statLine = line
     }
 
     /// Advance by `cycles` T-cycles (always <= 24, so at most one mode change per call).
@@ -113,13 +135,14 @@ final class PPU {
             if dots >= 80 {
                 dots -= 80
                 mode = 3
+                updateStatLine()
             }
         case 3: // Drawing
             if dots >= 172 {
                 dots -= 172
                 mode = 0
                 renderScanline()
-                if stat & 0x08 != 0 { irq |= 0x02 }
+                updateStatLine()
             }
         case 0: // HBlank
             if dots >= 204 {
@@ -127,14 +150,12 @@ final class PPU {
                 ly += 1
                 if ly == 144 {
                     mode = 1
-                    irq |= 0x01
-                    if stat & 0x10 != 0 { irq |= 0x02 }
+                    irq |= 0x01          // VBlank interrupt
                     frameComplete = true
                 } else {
                     mode = 2
-                    if stat & 0x20 != 0 { irq |= 0x02 }
                 }
-                checkLYC()
+                updateStatLine()
             }
         default: // VBlank
             if dots >= 456 {
@@ -144,9 +165,8 @@ final class PPU {
                     ly = 0
                     mode = 2
                     windowLine = 0
-                    if stat & 0x20 != 0 { irq |= 0x02 }
                 }
-                checkLYC()
+                updateStatLine()
             }
         }
     }
