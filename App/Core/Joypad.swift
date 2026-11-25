@@ -14,6 +14,9 @@ final class Joypad {
     /// Pending interrupt request bits (bit 4 = joypad). Merged into IF by the MMU.
     var irq: UInt8 = 0
 
+    /// True if any button is held, regardless of the P1 select lines. Used to wake from STOP.
+    var anyButtonPressed: Bool { directions != 0x0F || actions != 0x0F }
+
     func read() -> UInt8 {
         var result: UInt8 = 0xCF | (select & 0x30)
         if select & 0x10 == 0 { result &= 0xF0 | directions }
